@@ -17,7 +17,6 @@ ASG_KEY = "AutoScalingGroupName"
 
 # Fetches private IP of an instance via EC2 API
 def fetch_private_ip_from_ec2(instance_id):
-    logger.info("Fetching private IP for instance-id: %s", instance_id)
 
     ec2_response = ec2.describe_instances(InstanceIds=[instance_id])
     ip_address = ec2_response['Reservations'][0]['Instances'][0]['NetworkInterfaces'][0]['PrivateIpAddress']
@@ -26,7 +25,6 @@ def fetch_private_ip_from_ec2(instance_id):
 
     return ip_address
 
-# Fetches private IP of an instance via route53 API
 def fetch_private_ip_from_route53(hostname, zone_id):
     logger.info("Fetching private IP for hostname: %s", hostname)
 
@@ -40,6 +38,33 @@ def fetch_private_ip_from_route53(hostname, zone_id):
     logger.info("Found private IP for hostname %s: %s", hostname, ip_address)
 
     return ip_address
+
+# Fetches the healthy instances IPs and retuns them in a list
+def get_healthy_inst(asg_name):
+    inst_list = autoscaling.describe_auto_scaling_instances()
+    filtered = inst_list['AutoScalingInstances']
+    healthy = []
+    for f in filtered:
+        if f['AutoScalingGroupName'] == asg_name and f['HealthStatus'] == "HEALTHY":
+            healthy.append(fetch_private_ip_from_ec2(f['InstanceId']))
+        else:
+            continue
+    return healthy
+
+# Fetches a dict of private IPs and names from route53
+def fetch_ips_from_route53(hostname_pattern,zone_id):
+    fqdn = hostname_pattern.split('.',1)
+    zone_name = fqdn[1]
+    host = fqdn[0]
+    records = {}
+    logger.info("Fetching private IPs form route53 that have pattern %s", hostname_pattern)
+    ips=route53.list_resource_record_sets(StartRecordName=hostname_pattern, HostedZoneId=zone_id, StartRecordType='A', MaxItems='99')['ResourceRecordSets']
+    for item in ips:
+        if item.get("Name").startswith(host):
+            records[item.get("ResourceRecords")[0]["Value"]] = item.get("Name");
+    logger.info("Found in route53 the items: %s",records)
+    return records
+
 
 # Fetches relevant tags from ASG
 # Returns tuple of hostname_pattern, zone_id
@@ -58,9 +83,29 @@ def fetch_tag_metadata(asg_name):
 
     return tag_value.split("@")
 
+
 # Builds a hostname according to pattern
-def build_hostname(hostname_pattern, instance_id):
-    return hostname_pattern.replace('#instanceid', instance_id)
+def build_hostname(hostname_pattern, r53_dict, asg_inst_list):
+    fqdn = hostname_pattern.split('.',1)
+    prefix = fqdn[0]
+    zone_name = fqdn[1]
+    logger.info("Found %s healthy instances in ASG and %s matching A records in route53",len(asg_inst_list),len(r53_dict))
+    if len(asg_inst_list) > len(r53_dict):
+        # find first missing record
+        for i in range(1,len(asg_inst_list)+1):
+            if prefix+str('{:0>2d}'.format(i))+"."+zone_name+"." not in r53_dict.values():
+                logger.info("Found that %s is missing from dns",prefix+str('{:0>2d}'.format(i))+"."+zone_name+".")
+                return prefix+str('{:0>2d}'.format(i))+"."+zone_name+"."
+    elif len(asg_inst_list) == len(r53_dict):
+        for ip in r53_dict:
+            logger.info("Searching for IP %s in running instances",ip)
+            if ip in asg_inst_list:
+                logger.info("Found it, going to try next one")
+            else:
+                logger.info("dns entry for ip %s will be replaced",ip)
+                return r53_dict[ip]
+        logger.info("If we got here there is nothing else to do and we should exit")
+        sys.exit()
 
 # Updates the name tag of an instance
 def update_name_tag(instance_id, hostname):
@@ -98,6 +143,7 @@ def update_record(zone_id, ip, hostname, operation):
         }
     )
 
+
 # Processes a scaling event
 # Builds a hostname from tag metadata, fetches a private IP, and updates records accordingly
 def process_message(message):
@@ -114,17 +160,17 @@ def process_message(message):
     instance_id =  message['EC2InstanceId']
 
     hostname_pattern, zone_id = fetch_tag_metadata(asg_name)
-    hostname = build_hostname(hostname_pattern, instance_id)
+    r53_dict = fetch_ips_from_route53(hostname_pattern,zone_id)
+    hostname = build_hostname(hostname_pattern,r53_dict,get_healthy_inst(asg_name))
 
     if operation == "UPSERT":
         private_ip = fetch_private_ip_from_ec2(instance_id)
-
         update_name_tag(instance_id, hostname)
     else:
         private_ip = fetch_private_ip_from_route53(hostname, zone_id)
-
+    
     update_record(zone_id, private_ip, hostname, operation)
-
+    
 # Picks out the message from a SNS message and deserializes it
 def process_record(record):
     process_message(json.loads(record['Sns']['Message']))
@@ -147,7 +193,6 @@ def lambda_handler(event, context):
             InstanceId = message['EC2InstanceId'],
             LifecycleActionToken = message['LifecycleActionToken'],
             LifecycleActionResult = 'CONTINUE'
-        
         )
         logger.info("ASG action complete: %s", response)    
     else :

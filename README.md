@@ -9,7 +9,7 @@ This module sets up everything necessary for dynamically setting hostnames follo
 Create an ASG and set the `asg:hostname_pattern` tag for example like this:
 
 ```
-asg-test-#instanceid.asg-handler-vpc.testing@Z3QP9GZSRL8IVA
+asg-test.somedomain.internal@Z3QP9GZSRL8IVA
 ```
 
 Could be interpolated in Terraform like this:
@@ -17,7 +17,7 @@ Could be interpolated in Terraform like this:
 ```hcl
 tag {
   key = "asg:hostname_pattern"
-  value = "${var.hostname_prefix}-#instanceid.${var.vpc_name}.testing@${var.internal_zone_id}"
+  value = "${var.hostname_prefix}.${var.internal_domain}@${var.internal_zone_id}"
   propagate_at_launch = true
 }
 ```
@@ -45,7 +45,7 @@ The Lambda function then does the following:
 - Fetch the `asg:hostname_pattern` tag value from the ASG, and parse out the hostname and Route53 zone ID from it.
 - If it's a instance being created
 	- Fetch internal IP from EC2 API
-	- Create a Route53 record pointing the hostname to the IP
+	- Create a Route53 record by adding 2 digits afret the ${var.hostname_prefix} part, pointing the hostname to the IP
 	- Set the Name tag of the instance to the initial part of the generated hostname
 - If it's an instance being deleted
 	- Fetch the internal IP from the existing record from the Route53 API
@@ -96,13 +96,13 @@ resource "aws_autoscaling_group" "my_asg" {
 
   tag {
     key = "asg:hostname_pattern"
-    value = "${var.hostname_prefix}-#instanceid.${var.vpc_name}.testing@${var.internal_zone_id}"
+    value = "${var.hostname_prefix}.${var.internal_domain}@${var.internal_zone_id}"
     propagate_at_launch = true
   }
 }
 
 module "autoscale_dns" {
-  source = "github.com/meltwater/terraform-aws-asg-dns-handler"
+  source = "github.com/catalinmer/terraform-aws-asg-dns-handler"
 
   autoscale_update_name = "my_asg_handler"
 
